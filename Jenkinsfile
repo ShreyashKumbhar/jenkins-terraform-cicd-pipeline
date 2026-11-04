@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -6,7 +7,7 @@ pipeline {
     }
 
     triggers {
-        pollSCM('H/2 * * * *')   // check GitHub for new commits every ~2 minutes
+        pollSCM('H/2 * * * *')
     }
 
     stages {
@@ -15,22 +16,30 @@ pipeline {
             steps {
                 echo 'Checking out source code from GitHub...'
                 checkout scm
-                bat 'git log -1 --oneline'
+                sh 'git log -1 --oneline'
             }
         }
 
         stage('2. Lint & Unit Test') {
             steps {
                 echo 'Running unit tests...'
-                bat 'wsl python3 -m unittest discover -s tests -t . -v'
+                sh 'python3 -m unittest discover -s tests -t . -v'
             }
         }
 
         stage('3. Build Artifact / Docker Image') {
             steps {
                 echo 'Packaging application...'
-                bat 'wsl tar -czf app-build.tar.gz app Dockerfile'
-                bat 'wsl sh -c "docker info >/dev/null 2>&1 && docker build -t cicd-demo-app:%BUILD_NUMBER% . || echo Docker not available - image build skipped"'
+                sh 'tar -czf app-build.tar.gz app Dockerfile'
+
+                sh '''
+                    if docker info >/dev/null 2>&1; then
+                        docker build -t cicd-demo-app:${BUILD_NUMBER} .
+                    else
+                        echo "Docker not available - image build skipped"
+                    fi
+                '''
+
                 archiveArtifacts artifacts: 'app-build.tar.gz', fingerprint: true
             }
         }
@@ -38,11 +47,11 @@ pipeline {
         stage('4. Infrastructure Provisioning (Terraform)') {
             steps {
                 dir('terraform') {
-                    echo 'Provisioning AWS infrastructure with Terraform inside WSL...'
-                    bat 'wsl terraform init -input=false'
-                    bat 'wsl terraform validate'
-                    bat 'wsl terraform plan -input=false -out=tfplan'
-                    bat 'wsl terraform apply -input=false -auto-approve tfplan'
+                    echo 'Provisioning AWS infrastructure with Terraform...'
+                    sh 'terraform init -input=false'
+                    sh 'terraform validate'
+                    sh 'terraform plan -input=false -out=tfplan'
+                    sh 'terraform apply -input=false -auto-approve tfplan'
                 }
             }
         }
@@ -51,13 +60,19 @@ pipeline {
             steps {
                 dir('terraform') {
                     script {
-                        def ip = bat(returnStdout: true, script: '@wsl terraform output -raw ec2_public_ip').trim()
+                        def ip = sh(
+                            returnStdout: true,
+                            script: 'terraform output -raw ec2_public_ip'
+                        ).trim()
+
                         echo "Application server IP: ${ip}"
-                        echo 'Waiting for Nginx on the new server and verifying deployment...'
+                        echo 'Waiting for Nginx and verifying deployment...'
+
                         retry(10) {
                             sleep 20
-                            bat "wsl curl -sf http://${ip}"
+                            sh "curl -sf http://${ip}"
                         }
+
                         echo "Application is live at http://${ip}"
                     }
                 }
